@@ -1131,42 +1131,108 @@ app.post('/api/chat', async (req, res) => {
             res.setHeader('Connection', 'keep-alive');
             res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
             
+            let session = null;
+            
             try {
-                const session = await pool.getSession();
+                session = await pool.getSession();
                 session.activeRequests++;
                 await session.injectHelpers();
                 
-                // Start streaming
-                const streamGenerator = await session.page.evaluate(async (p, m) => {
-                    const stream = await window.doChatStream(p, m);
-                    const chunks = [];
-                    for await (const chunk of stream) {
-                        chunks.push(chunk);
-                    }
-                    return chunks;
-                }, input, model || 'gemini-2.0-flash');
+                // Create a unique callback ID for this stream
+                const callbackId = `stream_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
                 
-                // Send chunks as SSE
-                for (const chunk of streamGenerator) {
-                    if (chunk.error) {
-                        res.write(`data: ${JSON.stringify({ error: chunk.error })}\n\n`);
-                        break;
+                // Setup streaming with real-time callback
+                await session.page.exposeFunction(callbackId, (chunk) => {
+                    try {
+                        // Skip metadata chunks
+                        if (chunk.type === 'usage' || chunk.type === 'metadata' || chunk.usage) {
+                            return;
+                        }
+                        
+                        // Extract text
+                        let text = null;
+                        if (typeof chunk === 'string') {
+                            text = chunk;
+                        } else if (chunk.text) {
+                            text = chunk.text;
+                        } else if (chunk.content) {
+                            text = chunk.content;
+                        } else if (chunk.message) {
+                            text = typeof chunk.message === 'string' ? chunk.message : chunk.message.content;
+                        } else if (chunk.delta && chunk.delta.content) {
+                            text = chunk.delta.content;
+                        } else if (chunk.choices && chunk.choices[0]) {
+                            const choice = chunk.choices[0];
+                            text = choice.delta?.content || choice.text || choice.message?.content;
+                        }
+                        
+                        // Send chunk immediately
+                        if (text && text.trim() && !res.writableEnded) {
+                            res.write(`data: ${JSON.stringify({ text })}\n\n`);
+                        }
+                    } catch (e) {
+                        console.error('[Stream] Callback error:', e);
                     }
-                    
-                    const text = chunk.text || chunk.content || chunk.message || JSON.stringify(chunk);
-                    res.write(`data: ${JSON.stringify({ text })}\n\n`);
+                });
+                
+                // Start streaming with callback
+                const streamResult = await session.page.evaluate(async (p, m, cbId) => {
+                    try {
+                        if (!puter?.ai) {
+                            return { error: 'Puter AI not ready' };
+                        }
+                        
+                        const stream = await puter.ai.chat(p, { model: m, stream: true });
+                        
+                        // Handle different stream formats
+                        if (stream && typeof stream[Symbol.asyncIterator] === 'function') {
+                            for await (const chunk of stream) {
+                                // Call the exposed function to send chunk to Node.js
+                                await window[cbId](chunk);
+                            }
+                        } else if (stream && typeof stream.getReader === 'function') {
+                            const reader = stream.getReader();
+                            const decoder = new TextDecoder();
+                            
+                            while (true) {
+                                const { done, value } = await reader.read();
+                                if (done) break;
+                                
+                                const text = decoder.decode(value, { stream: true });
+                                await window[cbId]({ text });
+                            }
+                        } else {
+                            // Fallback: return as single chunk
+                            await window[cbId](stream);
+                        }
+                        
+                        return { success: true };
+                    } catch (e) {
+                        return { error: e.message || String(e) };
+                    }
+                }, input, model || 'gemini-2.0-flash', callbackId);
+                
+                // Check for errors
+                if (streamResult && streamResult.error) {
+                    res.write(`data: ${JSON.stringify({ error: streamResult.error })}\n\n`);
                 }
                 
-                res.write('data: [DONE]\n\n');
-                res.end();
+                // Send completion
+                if (!res.writableEnded) {
+                    res.write('data: [DONE]\n\n');
+                    res.end();
+                }
                 
                 session.activeRequests--;
                 if (global.gc) global.gc();
                 
             } catch (e) {
                 console.error('[Chat] Streaming error:', e);
-                res.write(`data: ${JSON.stringify({ error: e.message })}\n\n`);
-                res.end();
+                if (!res.writableEnded) {
+                    res.write(`data: ${JSON.stringify({ error: e.message })}\n\n`);
+                    res.end();
+                }
+                if (session) session.activeRequests--;
             }
             
             return;
