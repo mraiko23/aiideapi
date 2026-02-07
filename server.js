@@ -180,14 +180,61 @@ class BrowserSession {
             try {
                 let executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
 
+                // Try multiple paths for Chrome/Chromium on Render and local
                 if (!executablePath) {
-                    try {
-                        executablePath = puppeteerCore.executablePath();
-                        if (executablePath && !path.isAbsolute(executablePath)) {
-                            executablePath = path.resolve(process.cwd(), executablePath);
+                    const fsSync = require('fs');
+                    const { execSync } = require('child_process');
+                    
+                    const possiblePaths = [
+                        // Render.com cache (with glob)
+                        '/opt/render/project/src/.cache/puppeteer/chrome/linux-*/chrome-linux64/chrome',
+                        // Local cache (with glob)
+                        `${process.cwd()}/.cache/puppeteer/chrome/linux-*/chrome-linux64/chrome`,
+                        // System Chrome
+                        '/usr/bin/google-chrome',
+                        '/usr/bin/chromium-browser',
+                        '/usr/bin/chromium'
+                    ];
+
+                    for (const pathPattern of possiblePaths) {
+                        try {
+                            if (pathPattern.includes('*')) {
+                                // Glob pattern - find actual path
+                                const foundPath = execSync(`ls ${pathPattern} 2>/dev/null | head -1`, { encoding: 'utf8' }).trim();
+                                if (foundPath && fsSync.existsSync(foundPath)) {
+                                    executablePath = foundPath;
+                                    console.log(`[Session #${this.id}] ✅ Found Chrome at: ${executablePath}`);
+                                    break;
+                                }
+                            } else if (fsSync.existsSync(pathPattern)) {
+                                executablePath = pathPattern;
+                                console.log(`[Session #${this.id}] ✅ Found Chrome at: ${executablePath}`);
+                                break;
+                            }
+                        } catch (e) {
+                            // Continue to next path
                         }
-                    } catch (e) { }
+                    }
+                    
+                    // Last resort: try puppeteer default
+                    if (!executablePath) {
+                        try {
+                            executablePath = puppeteerCore.executablePath();
+                            if (executablePath && !path.isAbsolute(executablePath)) {
+                                executablePath = path.resolve(process.cwd(), executablePath);
+                            }
+                            console.log(`[Session #${this.id}] Using Puppeteer default: ${executablePath}`);
+                        } catch (e) {
+                            console.error(`[Session #${this.id}] ⚠️ Puppeteer default failed: ${e.message}`);
+                        }
+                    }
                 }
+
+                if (!executablePath) {
+                    throw new Error('❌ Chrome executable not found! Install Chrome or set PUPPETEER_EXECUTABLE_PATH');
+                }
+
+                console.log(`[Session #${this.id}] 🚀 Launching Chrome: ${executablePath}`);
 
                 const launchArgs = [
                     '--no-sandbox',

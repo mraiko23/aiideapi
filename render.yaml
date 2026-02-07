@@ -4,10 +4,14 @@ services:
     runtime: node
     region: frankfurt
     plan: free
-    buildCommand: ./render-build.sh
+    buildCommand: chmod +x render-build-simple.sh && ./render-build-simple.sh
     startCommand: npm start
     envVars:
       - key: NODE_ENV
         value: production
+      - key: PUPPETEER_SKIP_CHROMIUM_DOWNLOAD
+        value: false
       - key: PUPPETEER_CACHE_DIR
         value: /opt/render/project/src/.cache/puppeteer
+      - key: PUPPETEER_EXECUTABLE_PATH
+        sync: false
