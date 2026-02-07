@@ -1158,6 +1158,10 @@ app.post('/api/chat', async (req, res) => {
                     // Create a unique callback ID for this stream
                     const callbackId = `stream_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
                     
+                    // Track if we hit a limit error
+                    let limitErrorDetected = false;
+                    let limitErrorMessage = null;
+                    
                     // Setup streaming with real-time callback
                     await session.page.exposeFunction(callbackId, (chunk) => {
                         try {
@@ -1166,10 +1170,24 @@ app.post('/api/chat', async (req, res) => {
                                 const errorStr = JSON.stringify(chunk.error).toLowerCase();
                                 if (errorStr.includes('insufficient_funds') || 
                                     errorStr.includes('usage-limited') ||
-                                    errorStr.includes('limit')) {
+                                    errorStr.includes('limit') ||
+                                    errorStr.includes('quota')) {
                                     console.warn('[Stream] ⚠️ LIMIT REACHED in chunk!');
-                                    throw new Error('LIMIT_REACHED: ' + (chunk.error.message || JSON.stringify(chunk.error)));
+                                    limitErrorDetected = true;
+                                    limitErrorMessage = chunk.error.message || JSON.stringify(chunk.error);
+                                    
+                                    // Send error to client immediately
+                                    if (!res.writableEnded) {
+                                        res.write(`data: ${JSON.stringify({ error: 'LIMIT_REACHED', message: limitErrorMessage })}\n\n`);
+                                    }
+                                    return; // Don't throw, just mark and return
                                 }
+                                
+                                // Send other errors to client
+                                if (!res.writableEnded) {
+                                    res.write(`data: ${JSON.stringify({ error: chunk.error })}\n\n`);
+                                }
+                                return;
                             }
                             
                             // Skip metadata chunks
@@ -1200,7 +1218,10 @@ app.post('/api/chat', async (req, res) => {
                             }
                         } catch (e) {
                             console.error('[Stream] Callback error:', e);
-                            throw e;
+                            // Send error to client
+                            if (!res.writableEnded) {
+                                res.write(`data: ${JSON.stringify({ error: e.message })}\n\n`);
+                            }
                         }
                     });
                     
@@ -1211,11 +1232,42 @@ app.post('/api/chat', async (req, res) => {
                                 return { error: 'Puter AI not ready' };
                             }
                             
-                            const stream = await puter.ai.chat(p, { model: m, stream: true });
+                            let stream;
+                            try {
+                                stream = await puter.ai.chat(p, { model: m, stream: true });
+                            } catch (chatError) {
+                                // Catch errors from puter.ai.chat call itself
+                                console.error('[Puter Stream] Chat call failed:', chatError);
+                                
+                                // Extract error details
+                                let errorObj = {
+                                    message: chatError.message || String(chatError),
+                                    name: chatError.name,
+                                    stack: chatError.stack
+                                };
+                                
+                                // Check for limit-related properties
+                                if (chatError.delegate) errorObj.delegate = chatError.delegate;
+                                if (chatError.code) errorObj.code = chatError.code;
+                                if (chatError.status) errorObj.status = chatError.status;
+                                
+                                return { error: errorObj };
+                            }
                             
                             // Check if stream itself is an error
                             if (stream && stream.error) {
+                                console.error('[Puter Stream] Stream returned error:', stream.error);
                                 return { error: stream.error };
+                            }
+                            
+                            // Check if stream is actually an error response (no iterator)
+                            if (stream && !stream[Symbol.asyncIterator] && !stream.getReader && typeof stream === 'object') {
+                                // Might be an error object disguised as response
+                                const streamStr = JSON.stringify(stream).toLowerCase();
+                                if (streamStr.includes('error') || streamStr.includes('limit') || streamStr.includes('insufficient')) {
+                                    console.error('[Puter Stream] Stream looks like error:', stream);
+                                    return { error: stream };
+                                }
                             }
                             
                             // Handle different stream formats
@@ -1275,9 +1327,10 @@ app.post('/api/chat', async (req, res) => {
                         }
                     }, input, model || 'gemini-2.0-flash', callbackId);
                     
-                    // Check for errors
-                    if (streamResult && streamResult.error) {
-                        const errorStr = JSON.stringify(streamResult.error).toLowerCase();
+                    // Check for errors or limit detection
+                    if (limitErrorDetected || (streamResult && streamResult.error)) {
+                        const errorToCheck = limitErrorDetected ? { message: limitErrorMessage } : streamResult.error;
+                        const errorStr = JSON.stringify(errorToCheck).toLowerCase();
                         
                         // Check if it's a limit error
                         if (errorStr.includes('insufficient_funds') || 
@@ -1290,6 +1343,11 @@ app.post('/api/chat', async (req, res) => {
                                 
                                 if (session) session.activeRequests--;
                                 
+                                // Send notification to client about rotation
+                                if (!res.writableEnded) {
+                                    res.write(`data: ${JSON.stringify({ info: 'Rotating to new session, retrying...' })}\n\n`);
+                                }
+                                
                                 // Rotate to new browser
                                 await pool.forceRotate();
                                 
@@ -1298,10 +1356,16 @@ app.post('/api/chat', async (req, res) => {
                                 
                                 // Retry with new browser
                                 return executeStream(retryCount + 1);
+                            } else {
+                                // Max retries reached, send final error
+                                if (!res.writableEnded) {
+                                    res.write(`data: ${JSON.stringify({ error: 'LIMIT_REACHED', message: 'Maximum retries reached. Please try again later or get a new token.' })}\n\n`);
+                                }
                             }
+                        } else if (streamResult && streamResult.error && !res.writableEnded) {
+                            // Non-limit error
+                            res.write(`data: ${JSON.stringify({ error: streamResult.error })}\n\n`);
                         }
-                        
-                        res.write(`data: ${JSON.stringify({ error: streamResult.error })}\n\n`);
                     }
                     
                     // Send completion
