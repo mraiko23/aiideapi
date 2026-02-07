@@ -1,15 +1,13 @@
 // Features:
-// - ⚡ ULTRA-FAST Response System with Aggressive Caching & Compression
-// - 🚀 Optimized Single-Browser System (512MB RAM Optimized)
-// - 💾 Smart Session Recovery with Context Preservation
-// - 🔥 Cloudflare Bypass (puppeteer-real-browser)
-// - 🤖 Full AI Suite: Chat, Search, Image (Txt2Img/Img2Img), TTS, STT, Video
-// - 📦 Persistent Storage for Chats & Tokens
-// - 🛡️ Advanced Error Handling & Auto-Recovery
-// - ⚡ HTTP Compression, LRU Cache, Parallel Init, Fast Timeouts
+// - Ultra-Fast Response System with Smart Caching
+// - Memory-Efficient Single-Browser System (Optimized for 512MB RAM)
+// - Intelligent Session Recovery with Context Preservation
+// - Cloudflare Bypass (puppeteer-real-browser)
+// - Full AI Suite: Chat, Search, Image (Txt2Img/Img2Img), TTS, STT, Video
+// - Persistent Storage for Chats & Tokens
+// - Advanced Error Handling & Auto-Recovery
 
 const express = require('express');
-const compression = require('compression');
 const cors = require('cors');
 const puppeteerCore = require('puppeteer');
 const path = require('path');
@@ -94,23 +92,17 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const RENDER_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 
-// ULTRA-FAST Response Cache with LRU (10 min TTL, 500 entries)
+// Response Cache for identical requests (5 min TTL)
 const responseCache = new Map();
-const CACHE_TTL = 10 * 60 * 1000;
-const MAX_CACHE_SIZE = 500;
+const CACHE_TTL = 5 * 60 * 1000;
 
 function getCacheKey(endpoint, body) {
-    // Fast hash instead of full JSON stringify for speed
-    const str = typeof body === 'string' ? body : JSON.stringify(body);
-    return `${endpoint}:${str.length}:${str.substring(0, 100)}`;
+    return `${endpoint}:${JSON.stringify(body)}`;
 }
 
 function getFromCache(key) {
     const cached = responseCache.get(key);
     if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-        // LRU: Move to end
-        responseCache.delete(key);
-        responseCache.set(key, cached);
         return cached.data;
     }
     responseCache.delete(key);
@@ -118,39 +110,23 @@ function getFromCache(key) {
 }
 
 function setCache(key, data) {
-    // LRU eviction: Remove oldest if full
-    if (responseCache.size >= MAX_CACHE_SIZE) {
-        const firstKey = responseCache.keys().next().value;
-        responseCache.delete(firstKey);
-    }
     responseCache.set(key, { data, timestamp: Date.now() });
+    // Auto-cleanup old entries
+    if (responseCache.size > 100) {
+        const oldestKey = responseCache.keys().next().value;
+        responseCache.delete(oldestKey);
+    }
 }
 
-// ULTRA-FAST Middleware with compression
-app.use(compression({ 
-    level: 6, // Balance between speed and compression
-    threshold: 1024 // Only compress responses > 1KB
-}));
-app.use(cors({
-    origin: true,
-    credentials: true,
-    maxAge: 86400 // Cache preflight for 24h
-}));
-app.use(express.json({ 
-    limit: '50mb',
-    strict: false // Faster parsing
-}));
-app.use(express.static(path.join(__dirname, 'public'), {
-    maxAge: '1d', // Cache static files for 1 day
-    etag: true,
-    lastModified: true
-}));
+// Middleware
+app.use(cors());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.static(path.join(__dirname, 'public')));
 
-// Speed headers
+// Request compression for faster responses
 app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('Cache-Control', 'no-cache'); // For API responses
     next();
 });
 
@@ -167,15 +143,14 @@ process.on('unhandledRejection', (reason, promise) => {
     console.error('[CRITICAL] Unhandled Rejection:', reason);
 });
 
-// Keep-alive ping (optimized interval)
-const PING_INTERVAL = 120 * 1000; // 2 minutes (less frequent)
+// Keep-alive ping
+const PING_INTERVAL = 90 * 1000;
 function startKeepAlive() {
     setInterval(() => {
         try {
             const http = RENDER_URL.startsWith('https') ? require('https') : require('http');
-            http.get(`${RENDER_URL}/api/health`, (res) => { 
-                res.resume(); // Consume response to free memory
-            }).on('error', () => { });
+            console.log('[KeepAlive] Pinging self...');
+            http.get(`${RENDER_URL}/api/health`, (res) => { }).on('error', () => { });
         } catch (e) { }
     }, PING_INTERVAL);
 }
@@ -273,24 +248,9 @@ class BrowserSession {
                     '--metrics-recording-only',
                     '--mute-audio',
                     '--no-first-run',
-                    '--incognito',
+                    '--incognito',  // INCOGNITO MODE
                     '--disable-blink-features=AutomationControlled',
-                    '--window-position=-10000,-10000',
-                    // ULTRA-FAST optimizations (stable)
-                    '--disable-features=TranslateUI,BlinkGenPropertyTrees',
-                    '--disable-renderer-backgrounding',
-                    '--disable-backgrounding-occluded-windows',
-                    '--disable-client-side-phishing-detection',
-                    '--disable-default-apps',
-                    '--disable-hang-monitor',
-                    '--disable-popup-blocking',
-                    '--disable-prompt-on-repost',
-                    '--disable-domain-reliability',
-                    '--no-default-browser-check',
-                    '--no-pings',
-                    '--password-store=basic',
-                    '--use-mock-keychain'
-                    // NOTE: --single-process removed - causes detached frames
+                    '--window-position=-10000,-10000'
                 ];
 
                 const response = await connect({
@@ -315,14 +275,13 @@ class BrowserSession {
 
                 console.log(`[Session #${this.id}] ✅ Incognito browser launched!`);
 
-                // ULTRA-FAST timeouts
-                this.page.setDefaultNavigationTimeout(30000);
-                this.page.setDefaultTimeout(20000);
+                // Set faster navigation timeout
+                this.page.setDefaultNavigationTimeout(45000);
+                this.page.setDefaultTimeout(30000);
 
-                // Fastest possible page load
                 await this.page.goto('https://puter.com', {
-                    waitUntil: 'domcontentloaded', // Don't wait for everything
-                    timeout: 30000
+                    waitUntil: 'domcontentloaded',
+                    timeout: 45000
                 });
 
                 // DON'T inject old token - always get fresh one
@@ -354,43 +313,39 @@ class BrowserSession {
     async optimizePage() {
         if (!this.page) return;
         try {
-            console.log(`[Session #${this.id}] ULTRA-FAST optimization mode...`);
-            
+            console.log(`[Session #${this.id}] Enabling resource blocker (Save RAM Mode)...`);
+            // NOTE: setRequestInterception can conflict with some puppeteer-real-browser patches or cloudflare
+            // We will rely on launch args for now to be safe.
+            /*
+            await this.page.setRequestInterception(true);
+            this.page.on('request', (request) => {
+                const url = request.url();
+                const type = request.resourceType();
+                // We DON'T block images or styles anymore, as Puter's vision/image modules might need them.
+                // We only block heavy media and analytics.
+                if (['media', 'font'].includes(type) || url.includes('google-analytics') || url.includes('doubleclick') || url.includes('analytics')) {
+                    request.abort();
+                } else {
+                    request.continue();
+                }
+            });
+            */
+            // Alternative: Use CDP to block URLs safely
             const client = await this.page.target().createCDPSession();
-            
-            // Aggressive resource blocking for speed
+            // Disable aggressive resource blocking to allow Puter's multimodal features to work
             await client.send('Network.setBlockedURLs', {
-                urls: [
-                    '*.woff', '*.woff2', '*.ttf', '*.otf', // Fonts
-                    '*analytics*', '*doubleclick*', '*facebook.com/tr*', // Analytics
-                    '*ads*', '*tracking*', '*metrics*' // Ads & tracking
-                ]
+                urls: ['*.woff', '*.woff2', '*.ttf', '*analytics*', '*doubleclick*']
             });
-            
-            // Enable network caching
-            await client.send('Network.setCacheDisabled', { cacheDisabled: false });
-            
-            // Disable images for non-image tasks (can be toggled per request)
-            // await client.send('Emulation.setDefaultBackgroundColorOverride', { color: { r: 255, g: 255, b: 255, a: 1 } });
-            
-            // Faster page load settings
-            await this.page.evaluateOnNewDocument(() => {
-                // Disable animations for speed
-                const style = document.createElement('style');
-                style.textContent = '* { animation-duration: 0s !important; transition-duration: 0s !important; }';
-                document.head?.appendChild(style);
-            });
-            
         } catch (e) {
             console.warn(`[Session #${this.id}] Optimization warning: ${e.message}`);
         }
     }
 
     async waitForLogin() {
-        console.log(`[Session #${this.id}] FAST login detection...`);
+        console.log(`[Session #${this.id}] Waiting for Login...`);
         let loggedIn = false;
 
-        for (let i = 0; i < 30; i++) { // 60 seconds max (faster)
+        for (let i = 0; i < 45; i++) { // 90 seconds max
             await new Promise(r => setTimeout(r, 2000));
 
             // Auto-click "Get Started"
@@ -407,9 +362,9 @@ class BrowserSession {
             // Check Status
             const state = await this.getPageStatus();
             
-            // Minimal logging for speed
-            if (i % 10 === 0) { // Log every 20 seconds
-                console.log(`[Session #${this.id}] Check ${i}: API=${state.api}, Token=${state.token ? 'YES' : 'NO'}`);
+            // Debug logging
+            if (i % 5 === 0) { // Log every 10 seconds
+                console.log(`[Session #${this.id}] Check ${i}: API=${state.api}, Token=${state.token ? 'YES (' + (typeof state.token) + ')' : 'NO'}`);
             }
             
             if (state.api && state.token) {
@@ -967,17 +922,16 @@ app.post('/api/video/generate', async (req, res) => {
 });
 
 // =====================
-// Session Pool (Hot-Swap Dual Browser System)
+// Session Pool (Manager)
 // =====================
 
 class SessionPool {
     constructor() {
-        this.active = null;      // Currently active browser
-        this.standby = null;     // Hot standby browser (ready to swap)
+        this.primary = null;
         this.sessionCounter = 0;
+        this.tokenCache = null; // Don't load from storage - always fresh
         this.isInitializing = false;
         this.initPromise = null;
-        this.isRotating = false;
     }
 
     async init() {
@@ -985,23 +939,10 @@ class SessionPool {
         
         this.isInitializing = true;
         this.initPromise = (async () => {
-            console.log('[Pool] 🚀 ULTRA-FAST Dual Browser Init...');
+            console.log('[Pool] Initializing Ultra-Fast Browser System...');
             try {
-                // PARALLEL LAUNCH for maximum speed
-                console.log('[Pool] Launching 2 browsers simultaneously...');
-                const startTime = Date.now();
-                
-                const [browser1, browser2] = await Promise.all([
-                    this.createSession('active'),
-                    this.createSession('standby')
-                ]);
-                
-                this.active = browser1;
-                this.standby = browser2;
-                
-                const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-                console.log(`[Pool] ✅ Ready in ${elapsed}s!`);
-                console.log(`[Pool] Active: #${this.active.id} | Standby: #${this.standby.id}`);
+                this.primary = await this.createSession('primary');
+                console.log('[Pool] ✅ System Ready!');
             } catch (e) {
                 console.error('[Pool] Init failed:', e.message);
                 this.isInitializing = false;
@@ -1018,9 +959,12 @@ class SessionPool {
         const s = new BrowserSession(this.sessionCounter, type);
 
         try {
+            // ALWAYS create fresh session, NO token injection
             await s.init(null);
             if (s.token) {
-                console.log(`[Pool] ✅ Session #${s.id} (${type}) ready with token`);
+                console.log(`[Pool] ✅ NEW Token captured from Session #${s.id}:`);
+                console.log(`[Pool] ${s.token}`);
+                this.updateToken(s.token);
             }
             return s;
         } catch (e) {
@@ -1029,117 +973,77 @@ class SessionPool {
         }
     }
 
+    updateToken(token) {
+        if (!token) {
+            console.log('[Pool] ⚠️ Empty token received, ignoring...');
+            return;
+        }
+        
+        // Convert to string if it's an object
+        let tokenStr = token;
+        if (typeof token === 'object') {
+            console.log('[Pool] ⚠️ Token is object, extracting string...');
+            tokenStr = token.token || token.value || token.auth_token || JSON.stringify(token);
+        }
+        
+        // Validate token
+        if (typeof tokenStr !== 'string' || tokenStr.length < 20 || tokenStr === '{}' || tokenStr === 'null' || tokenStr === 'undefined') {
+            console.log('[Pool] ⚠️ Invalid token format, ignoring:', tokenStr);
+            return;
+        }
+        
+        // Check if token actually changed
+        if (this.tokenCache && this.tokenCache === tokenStr) {
+            console.log('[Pool] ⚠️ Same token detected, ignoring...');
+            return;
+        }
+        
+        this.tokenCache = tokenStr;
+        chatStore.saveToken(tokenStr);
+        
+        console.log('[Pool] 💾 NEW Token saved to persistent storage');
+        console.log('[Pool] Token:', tokenStr);
+    }
+
     async getSession() {
         // If initializing, wait for it
         if (this.isInitializing) {
             await this.initPromise;
         }
 
-        // Return active if ready
-        if (this.active && this.active.isReady) {
-            return this.active;
-        }
+        if (this.primary && this.primary.isReady) return this.primary;
         
-        // Fallback to standby if active is dead
-        if (this.standby && this.standby.isReady) {
-            console.warn('[Pool] ⚠️ Active dead, using standby...');
-            await this.hotSwap();
-            return this.active;
-        }
+        // Auto-recovery attempt
+        console.warn('[Pool] Primary not ready, attempting recovery...');
+        await this.forceRotate();
         
-        throw new Error('No sessions available');
+        if (this.primary && this.primary.isReady) return this.primary;
+        throw new Error('Session unavailable after recovery attempt');
     }
 
-    async hotSwap() {
-        if (this.isRotating) {
-            console.log('[Pool] Already rotating, waiting...');
-            await new Promise(r => setTimeout(r, 1000));
-            return this.active;
-        }
+    async forceRotate() {
+        console.warn('[Pool] ⚠️ FORCE ROTATION - Opening NEW INCOGNITO Browser ⚠️');
         
-        this.isRotating = true;
+        const oldSession = this.primary;
         
         try {
-            console.log('[Pool] 🔄 HOT-SWAP: Switching to standby browser...');
+            // Create FRESH session with NO token (new incognito)
+            this.primary = await this.createSession('primary');
             
-            const oldActive = this.active;
-            const oldStandby = this.standby;
-            
-            // INSTANT SWAP: Standby becomes active
-            this.active = oldStandby;
-            this.standby = null;
-            
-            console.log(`[Pool] ✅ SWAPPED! New Active: #${this.active.id}`);
-            console.log(`[Pool] New Active Token: ${this.active.token?.substring(0, 20)}...`);
-            
-            // Kill old active browser in background (non-blocking)
-            if (oldActive) {
-                console.log(`[Pool] �️ Killing old browser #${oldActive.id}...`);
-                oldActive.close().catch(() => {});
+            // Close old session immediately
+            if (oldSession) {
+                console.log('[Pool] Closing old session...');
+                oldSession.close().catch(() => {});
             }
             
-            // Start creating new standby in background (non-blocking)
-            console.log('[Pool] 🔧 Creating new standby browser in background...');
-            this.createSession('standby')
-                .then(newStandby => {
-                    this.standby = newStandby;
-                    console.log(`[Pool] ✅ New Standby Ready: #${newStandby.id}`);
-                    console.log(`[Pool] Standby Token: ${newStandby.token?.substring(0, 20)}...`);
-                    
-                    // Force GC after swap complete
-                    if (global.gc) {
-                        console.log('[Pool] 🧹 Running garbage collection...');
-                        global.gc();
-                    }
-                })
-                .catch(e => {
-                    console.error('[Pool] ⚠️ Failed to create new standby:', e.message);
-                    // Try again after delay
-                    setTimeout(() => {
-                        console.log('[Pool] � Retrying standby creation...');
-                        this.createSession('standby')
-                            .then(s => {
-                                this.standby = s;
-                                console.log(`[Pool] ✅ Standby recovered: #${s.id}`);
-                            })
-                            .catch(e2 => console.error('[Pool] ⚠️ Standby retry failed:', e2.message));
-                    }, 5000);
-                });
-            
-            this.isRotating = false;
-            return this.active;
+            console.log('[Pool] ✅ Rotation complete with NEW token!');
+            return this.primary;
             
         } catch (e) {
-            console.error('[Pool] Hot-swap failed:', e.message);
-            this.isRotating = false;
+            console.error('[Pool] Rotation failed:', e.message);
+            // Don't restore old session - we want fresh one
             throw e;
         }
-    }
-
-    // Force rotation (for limit errors)
-    async forceRotate() {
-        console.warn('[Pool] ⚠️ LIMIT REACHED - Forcing hot-swap...');
-        return await this.hotSwap();
-    }
-
-    // Get system status
-    getStatus() {
-        return {
-            active: this.active ? {
-                id: this.active.id,
-                ready: this.active.isReady,
-                status: this.active.status,
-                hasToken: !!this.active.token,
-                activeRequests: this.active.activeRequests
-            } : null,
-            standby: this.standby ? {
-                id: this.standby.id,
-                ready: this.standby.isReady,
-                status: this.standby.status,
-                hasToken: !!this.standby.token
-            } : null,
-            isRotating: this.isRotating
-        };
     }
 }
 
@@ -1149,7 +1053,6 @@ const pool = new SessionPool();
 // Helper: Execute with Failover
 // =====================
 
-// ULTRA-FAST execution with minimal overhead
 async function safeExecute(actionName, fn, retryCount = 0) {
     const MAX_RETRIES = 2;
     let session = null;
@@ -1158,53 +1061,63 @@ async function safeExecute(actionName, fn, retryCount = 0) {
         session = await pool.getSession();
         session.activeRequests++;
 
-        // Skip helper injection if already done (speed optimization)
-        if (!session._helpersInjected) {
-            await session.injectHelpers();
-            session._helpersInjected = true;
-        }
-        
+        await session.injectHelpers();
         const result = await fn(session);
 
         session.activeRequests--;
+        if (session.status === 'retiring' && session.activeRequests <= 0) {
+            session.close();
+        }
 
-        // Fast error check
-        if (result?.error) {
-            const errorStr = String(result.error).toLowerCase();
+        // Check for limit errors in result
+        if (result && result.error) {
+            const errorStr = JSON.stringify(result.error).toLowerCase();
             if (errorStr.includes('insufficient_funds') || 
                 errorStr.includes('usage-limited') || 
                 errorStr.includes('limit') ||
                 errorStr.includes('quota')) {
-                console.warn(`[${actionName}] ⚠️ LIMIT! Rotating...`);
-                throw new Error('LIMIT_REACHED');
+                console.warn(`[${actionName}] ⚠️ LIMIT REACHED! Rotating browser...`);
+                throw new Error('LIMIT_REACHED: ' + (result.error.message || JSON.stringify(result.error)));
             }
         }
 
-        // Periodic GC only (not every request)
-        if (Math.random() < 0.1 && global.gc) global.gc();
+        // Aggressive GC
+        if (global.gc) global.gc();
 
         return result;
 
     } catch (e) {
-        if (session) session.activeRequests--;
+        if (session) {
+            session.activeRequests--;
+            if (session.status === 'retiring' && session.activeRequests <= 0) {
+                session.close();
+            }
+        }
 
         const errStr = e.toString().toLowerCase();
-        const isRecoverable = 
+        const isRecoverableError = 
             errStr.includes('limit') || 
             errStr.includes('quota') || 
             errStr.includes('429') || 
+            errStr.includes('rate') ||
             errStr.includes('insufficient_funds') ||
+            errStr.includes('usage-limited') ||
             errStr.includes('navigat') || 
             errStr.includes('protocol') ||
+            errStr.includes('session') ||
             errStr.includes('target closed');
 
-        if (isRecoverable && retryCount < MAX_RETRIES) {
-            console.warn(`[${actionName}] 🔄 Retry ${retryCount + 1}/${MAX_RETRIES}`);
+        if (isRecoverableError && retryCount < MAX_RETRIES) {
+            console.warn(`[${actionName}] 🔄 Recoverable error (attempt ${retryCount + 1}/${MAX_RETRIES}): ${e.message}`);
             
-            // Faster backoff
-            await new Promise(r => setTimeout(r, (retryCount + 1) * 1000));
+            // Wait before retry (exponential backoff)
+            await new Promise(r => setTimeout(r, (retryCount + 1) * 2000));
+            
+            // Rotate session - this will open NEW incognito browser with NEW token
+            console.log(`[${actionName}] 🔄 Rotating to NEW browser...`);
             await pool.forceRotate();
             
+            // Retry with new session
             return safeExecute(actionName, fn, retryCount + 1);
         }
         
@@ -1507,11 +1420,11 @@ app.post('/api/chat', async (req, res) => {
             }
         }
 
-        // Logging (minimal for speed)
+        // Logging
         if (Array.isArray(input)) {
-            console.log(`[Chat] ${input.length} msgs, Model: ${model || 'default'}`);
+            console.log(`[Chat] Messages: ${input.length}, Model: ${model || 'default'}, ChatID: ${chatId || 'none'}`);
         } else {
-            console.log(`[Chat] "${input.substring(0, 30)}...", Model: ${model || 'default'}`);
+            console.log(`[Chat] Prompt: ${input.substring(0, 50)}..., Model: ${model || 'default'}`);
         }
 
         const result = await safeExecute('Chat', async (session) => {
@@ -1674,18 +1587,30 @@ app.post('/api/tool/s2s', async (req, res) => {
     }
 });
 
-// ULTRA-FAST Health Check (minimal overhead)
+// Health & Debug (Enhanced)
 app.get('/api/health', (req, res) => {
-    const isReady = pool.active?.isReady && pool.active?.token;
+    const isReady = pool.primary && pool.primary.isReady && pool.primary.token;
     
-    // Fast response with minimal data
     res.status(isReady ? 200 : 503).json({
         status: isReady ? 'ready' : 'initializing',
         ready: isReady,
-        active: pool.active?.id || null,
-        standby: pool.standby?.id || null,
-        cache: responseCache.size,
-        uptime: Math.floor(process.uptime())
+        primary: {
+            ready: pool.primary?.isReady || false,
+            id: pool.primary?.id || null,
+            activeRequests: pool.primary?.activeRequests || 0,
+            hasToken: !!pool.primary?.token,
+            status: pool.primary?.status || 'unknown'
+        },
+        cache: {
+            size: responseCache.size,
+            maxSize: 100
+        },
+        storage: {
+            chats: chatStore.data.chats.length,
+            hasToken: !!chatStore.data.lastToken
+        },
+        uptime: process.uptime(),
+        memory: process.memoryUsage()
     });
 });
 
