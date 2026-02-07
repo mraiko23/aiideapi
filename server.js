@@ -1027,14 +1027,18 @@ class SessionPool {
         const oldSession = this.primary;
         
         try {
-            // Create FRESH session with NO token (new incognito)
-            this.primary = await this.createSession('primary');
-            
-            // Close old session immediately
+            // FIRST: Close old session to free memory
             if (oldSession) {
-                console.log('[Pool] Closing old session...');
-                oldSession.close().catch(() => {});
+                console.log('[Pool] 🔴 Closing old session FIRST to free memory...');
+                await oldSession.close().catch((e) => {
+                    console.warn('[Pool] Old session close warning:', e.message);
+                });
+                console.log('[Pool] ✅ Old session closed, memory freed');
             }
+            
+            // SECOND: Create FRESH session with NO token (new incognito)
+            console.log('[Pool] 🟢 Creating NEW session...');
+            this.primary = await this.createSession('primary');
             
             console.log('[Pool] ✅ Rotation complete with NEW token!');
             return this.primary;
