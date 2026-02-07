@@ -1213,22 +1213,43 @@ app.post('/api/chat', async (req, res) => {
                             
                             const stream = await puter.ai.chat(p, { model: m, stream: true });
                             
+                            // Check if stream itself is an error
+                            if (stream && stream.error) {
+                                return { error: stream.error };
+                            }
+                            
                             // Handle different stream formats
                             if (stream && typeof stream[Symbol.asyncIterator] === 'function') {
-                                for await (const chunk of stream) {
-                                    // Call the exposed function to send chunk to Node.js
-                                    await window[cbId](chunk);
+                                try {
+                                    for await (const chunk of stream) {
+                                        // Check each chunk for errors
+                                        if (chunk && chunk.error) {
+                                            console.error('[Puter Stream] Error chunk:', chunk.error);
+                                            return { error: chunk.error };
+                                        }
+                                        
+                                        // Call the exposed function to send chunk to Node.js
+                                        await window[cbId](chunk);
+                                    }
+                                } catch (streamError) {
+                                    console.error('[Puter Stream] Iteration error:', streamError);
+                                    return { error: streamError.message || String(streamError) };
                                 }
                             } else if (stream && typeof stream.getReader === 'function') {
                                 const reader = stream.getReader();
                                 const decoder = new TextDecoder();
                                 
-                                while (true) {
-                                    const { done, value } = await reader.read();
-                                    if (done) break;
-                                    
-                                    const text = decoder.decode(value, { stream: true });
-                                    await window[cbId]({ text });
+                                try {
+                                    while (true) {
+                                        const { done, value } = await reader.read();
+                                        if (done) break;
+                                        
+                                        const text = decoder.decode(value, { stream: true });
+                                        await window[cbId]({ text });
+                                    }
+                                } catch (readerError) {
+                                    console.error('[Puter Stream] Reader error:', readerError);
+                                    return { error: readerError.message || String(readerError) };
                                 }
                             } else {
                                 // Fallback: return as single chunk
@@ -1237,7 +1258,20 @@ app.post('/api/chat', async (req, res) => {
                             
                             return { success: true };
                         } catch (e) {
-                            return { error: e.message || String(e) };
+                            console.error('[Puter Stream] Top-level error:', e);
+                            // Extract detailed error info
+                            let errorObj = {
+                                message: e.message || String(e),
+                                name: e.name,
+                                stack: e.stack
+                            };
+                            
+                            // Try to get more details from Puter error
+                            if (e.delegate) errorObj.delegate = e.delegate;
+                            if (e.code) errorObj.code = e.code;
+                            if (e.status) errorObj.status = e.status;
+                            
+                            return { error: errorObj };
                         }
                     }, input, model || 'gemini-2.0-flash', callbackId);
                     
@@ -1491,13 +1525,17 @@ app.post('/api/tool/s2s', async (req, res) => {
 
 // Health & Debug (Enhanced)
 app.get('/api/health', (req, res) => {
-    res.json({
-        status: 'ok',
+    const isReady = pool.primary && pool.primary.isReady && pool.primary.token;
+    
+    res.status(isReady ? 200 : 503).json({
+        status: isReady ? 'ready' : 'initializing',
+        ready: isReady,
         primary: {
-            ready: pool.primary?.isReady,
-            id: pool.primary?.id,
-            activeRequests: pool.primary?.activeRequests,
-            hasToken: !!pool.primary?.token
+            ready: pool.primary?.isReady || false,
+            id: pool.primary?.id || null,
+            activeRequests: pool.primary?.activeRequests || 0,
+            hasToken: !!pool.primary?.token,
+            status: pool.primary?.status || 'unknown'
         },
         cache: {
             size: responseCache.size,
