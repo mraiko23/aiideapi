@@ -501,11 +501,18 @@ class BrowserSession {
         await this.page.evaluate(() => {
             window.puterReady = true;
 
-            // Chat Wrapper
-            window.doChat = async (prompt, model) => {
+            // Chat Wrapper (with streaming support)
+            window.doChat = async (prompt, model, stream = false) => {
                 try {
                     if (!puter?.ai) return { error: 'Puter AI not ready' };
-                    return await puter.ai.chat(prompt, { model });
+                    
+                    if (stream) {
+                        // Streaming mode - return async generator
+                        return puter.ai.chat(prompt, { model, stream: true });
+                    } else {
+                        // Normal mode
+                        return await puter.ai.chat(prompt, { model });
+                    }
                 } catch (e) {
                     // Create a serializable error report
                     let message = e.message || String(e);
@@ -525,6 +532,42 @@ class BrowserSession {
                         });
                     } catch (e2) { }
                     return { error: report };
+                }
+            };
+
+            // Streaming Chat Helper
+            window.doChatStream = async function* (prompt, model) {
+                try {
+                    if (!puter?.ai) {
+                        yield { error: 'Puter AI not ready' };
+                        return;
+                    }
+                    
+                    const stream = await puter.ai.chat(prompt, { model, stream: true });
+                    
+                    // Handle different stream formats
+                    if (stream && typeof stream[Symbol.asyncIterator] === 'function') {
+                        for await (const chunk of stream) {
+                            yield chunk;
+                        }
+                    } else if (stream && typeof stream.getReader === 'function') {
+                        // ReadableStream
+                        const reader = stream.getReader();
+                        const decoder = new TextDecoder();
+                        
+                        while (true) {
+                            const { done, value } = await reader.read();
+                            if (done) break;
+                            
+                            const text = decoder.decode(value, { stream: true });
+                            yield { text };
+                        }
+                    } else {
+                        // Fallback: return as single chunk
+                        yield stream;
+                    }
+                } catch (e) {
+                    yield { error: e.message || String(e) };
                 }
             };
 
@@ -1071,93 +1114,67 @@ async function safeExecute(actionName, fn, retryCount = 0) {
 // API Endpoints
 // =====================
 
-// 1. Chat
+// 1. Chat (Ultra-Fast with Context Preservation + Streaming Support)
 app.post('/api/chat', async (req, res) => {
     try {
-        const { prompt, model, messages, system } = req.body;
+        const { prompt, model, messages, system, chatId, stream = false } = req.body;
         let input = messages || prompt;
         if (!input && !messages) return res.status(400).json({ error: 'No input provided' });
 
-        // Logging for debug
-        if (Array.isArray(input)) {
-            console.log(`[Chat] Payload: Array (${input.length} messages) Model: ${model || 'default'}`);
-        } else {
-            console.log(`[Chat] Payload: String (${input.length} chars) Model: ${model || 'default'}`);
-        }
-
-        const result = await safeExecute('Chat', async (session) => {
-            return await session.page.evaluate(async (p, m) => window.doChat(p, m), input, model || 'gemini-2.0-flash');
-        });
-
-        if (result && result.error) {
-            const errDetails = typeof result.error === 'object' ? JSON.stringify(result.error, null, 2) : String(result.error);
-            throw new Error(errDetails);
-        }
-
-        // Normalize output (Robust Parsing)
-        let text = '';
-        // Normalize output (Robust Parsing)
-        const normalizeResponse = (res) => {
-            if (!res) return '';
-            if (typeof res === 'string') return res;
-
-            // Helper to extract text from content (string or array)
-            const extractContent = (content) => {
-                if (typeof content === 'string') return content;
-                if (Array.isArray(content)) {
-                    // Try to finding 'text' in any item, or join everything
-                    return content.map(c => {
-                        if (typeof c === 'string') return c;
-                        return c.text || c.content || JSON.stringify(c);
-                    }).join('');
+        // Streaming mode
+        if (stream) {
+            console.log(`[Chat] STREAMING mode enabled`);
+            
+            // Set headers for SSE (Server-Sent Events)
+            res.setHeader('Content-Type', 'text/event-stream');
+            res.setHeader('Cache-Control', 'no-cache');
+            res.setHeader('Connection', 'keep-alive');
+            res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
+            
+            try {
+                const session = await pool.getSession();
+                session.activeRequests++;
+                await session.injectHelpers();
+                
+                // Start streaming
+                const streamGenerator = await session.page.evaluate(async (p, m) => {
+                    const stream = await window.doChatStream(p, m);
+                    const chunks = [];
+                    for await (const chunk of stream) {
+                        chunks.push(chunk);
+                    }
+                    return chunks;
+                }, input, model || 'gemini-2.0-flash');
+                
+                // Send chunks as SSE
+                for (const chunk of streamGenerator) {
+                    if (chunk.error) {
+                        res.write(`data: ${JSON.stringify({ error: chunk.error })}\n\n`);
+                        break;
+                    }
+                    
+                    const text = chunk.text || chunk.content || chunk.message || JSON.stringify(chunk);
+                    res.write(`data: ${JSON.stringify({ text })}\n\n`);
                 }
-                return JSON.stringify(content);
-            };
-
-            // Standard message structures
-            if (res.message) {
-                if (res.message.content) return extractContent(res.message.content);
-                if (res.message.text) return res.message.text;
-                if (typeof res.message === 'string') return res.message;
+                
+                res.write('data: [DONE]\n\n');
+                res.end();
+                
+                session.activeRequests--;
+                if (global.gc) global.gc();
+                
+            } catch (e) {
+                console.error('[Chat] Streaming error:', e);
+                res.write(`data: ${JSON.stringify({ error: e.message })}\n\n`);
+                res.end();
             }
-
-            // OpenAI / Choices structure
-            if (res.choices && res.choices[0]) {
-                const choice = res.choices[0];
-                if (choice.message) return extractContent(choice.message.content);
-                if (choice.text) return choice.text;
-            }
-
-            // Anthropic direct / Claude specific
-            if (res.content) return extractContent(res.content);
-            if (res.text) return res.text;
-
-            // Final fallback
-            return typeof res === 'object' ? JSON.stringify(res, null, 2) : String(res);
-        };
-
-        text = normalizeResponse(result);
-        res.json({ text, full: result });
-
-    } catch (e) {
-        console.error(`[Chat] Critical Error:`, e);
-        let errMsg = e.message || String(e);
-        if (errMsg === '[object Object]') {
-            try { errMsg = JSON.stringify(e, null, 2); } catch (e3) { errMsg = e.toString(); }
+            
+            return;
         }
-        res.status(500).json({ error: errMsg });
-    }
-});
 
-// 1. Chat (Ultra-Fast with Context Preservation)
-app.post('/api/chat', async (req, res) => {
-    try {
-        const { prompt, model, messages, system, chatId } = req.body;
-        let input = messages || prompt;
-        if (!input && !messages) return res.status(400).json({ error: 'No input provided' });
-
+        // Normal mode (non-streaming)
         // Check cache for identical requests (skip for chat history)
-        if (!chatId && typeof input === 'string') {
+        if (!chatId && typeof input === 'string' && !stream) {
             const cacheKey = getCacheKey('chat', { prompt: input, model });
             const cached = getFromCache(cacheKey);
             if (cached) {
@@ -1174,7 +1191,7 @@ app.post('/api/chat', async (req, res) => {
         }
 
         const result = await safeExecute('Chat', async (session) => {
-            return await session.page.evaluate(async (p, m) => window.doChat(p, m), input, model || 'gemini-2.0-flash');
+            return await session.page.evaluate(async (p, m) => window.doChat(p, m, false), input, model || 'gemini-2.0-flash');
         });
 
         if (result && result.error) {
