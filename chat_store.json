@@ -1,0 +1,12 @@
+{
+  "chats": [],
+  "tokens": [
+    {
+      "userId": "default",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0IjoicyIsInYiOiIwLjAuMCIsInUiOiJmdGdabzI2K1FuMldLV3RFcll2Sk53PT0iLCJ1dSI6InphVkZ1cTNJU3RtVDF3dm5SZ0FxblE9PSIsImlhdCI6MTc3MDgwMzEyNH0.keHyNHR7KoLnrnhlG4Chvu154ZKtuW4P6A8NJQMxWiQ",
+      "createdAt": "2026-02-11T09:00:51.008Z",
+      "updatedAt": "2026-02-11T09:45:53.568Z"
+    }
+  ],
+  "lastToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0IjoicyIsInYiOiIwLjAuMCIsInUiOiJmdGdabzI2K1FuMldLV3RFcll2Sk53PT0iLCJ1dSI6InphVkZ1cTNJU3RtVDF3dm5SZ0FxblE9PSIsImlhdCI6MTc3MDgwMzEyNH0.keHyNHR7KoLnrnhlG4Chvu154ZKtuW4P6A8NJQMxWiQ"
+}

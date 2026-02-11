@@ -156,6 +156,310 @@ function startKeepAlive() {
 }
 
 // =====================
+// Temp Mail Helper (tempmailhub.org)
+// =====================
+
+class TempMailHelper {
+    constructor(browser) {
+        this.browser = browser;
+        this.mailPage = null;
+        this.email = null;
+    }
+
+    async init() {
+        // Create new page for temp mail
+        this.mailPage = await this.browser.newPage();
+        await this.mailPage.setDefaultNavigationTimeout(60000);
+        await this.mailPage.setViewport({ width: 1280, height: 720 });
+        
+        console.log('[TempMail] Opening 22.do...');
+        await this.mailPage.goto('https://22.do/ru/inbox/#/', {
+            waitUntil: 'networkidle2',
+            timeout: 60000
+        });
+        
+        // Wait for email to be generated
+        await new Promise(r => setTimeout(r, 3000));
+        
+        // Get the email address from 22.do - must be gmail.com or googlemail.com
+        const maxAttempts = 15;
+        for (let i = 0; i < maxAttempts; i++) {
+            try {
+                // 22.do shows email in specific elements
+                const emailSelectors = [
+                    '[class*="email"]',
+                    '[class*="address"]',
+                    'input[readonly]',
+                    '.inbox-email',
+                    '#email-address',
+                    '[data-clipboard-text]'
+                ];
+                
+                for (const selector of emailSelectors) {
+                    const emailElement = await this.mailPage.$(selector);
+                    if (emailElement) {
+                        let rawEmail = await this.mailPage.evaluate(el => {
+                            return el.value || el.textContent || el.getAttribute('data-clipboard-text');
+                        }, emailElement);
+                        
+                        // Skip if empty
+                        if (!rawEmail || rawEmail.trim() === '') {
+                            continue;
+                        }
+                        
+                        console.log(`[TempMail] Raw text from ${selector}: ${rawEmail?.substring(0, 50)}`);
+                        // Extract email using regex
+                        const emailMatch = rawEmail?.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,6}/);
+                        if (emailMatch) {
+                            const extractedEmail = emailMatch[0];
+                            console.log(`[TempMail] Extracted email: ${extractedEmail}`);
+                            
+                            // Check if it's gmail.com or googlemail.com
+                            if (extractedEmail.toLowerCase().endsWith('@gmail.com') || 
+                                extractedEmail.toLowerCase().endsWith('@googlemail.com')) {
+                                this.email = extractedEmail;
+                                console.log(`[TempMail] ✅ Got valid Gmail address: ${this.email}`);
+                                return this.email;
+                            } else {
+                                console.log(`[TempMail] ❌ Email is not Gmail (${extractedEmail}), getting new email...`);
+                                
+                                // Try refreshing page to get new email instead of clicking button
+                                await this.mailPage.reload({ waitUntil: 'networkidle2' });
+                                console.log('[TempMail] Page reloaded, waiting for new email...');
+                                await new Promise(r => setTimeout(r, 4000));
+                                
+                                // Also try clicking change button as fallback
+                                try {
+                                    const clicked = await this.mailPage.evaluate(() => {
+                                        // Try the specific button structure from 22.do
+                                        const changeBtn = document.querySelector('#idChange, .card.action.change, [class*="change-text"]');
+                                        if (changeBtn) {
+                                            changeBtn.click();
+                                            return 'Clicked #idChange button';
+                                        }
+                                        
+                                        // Fallback: look for Изменить text
+                                        const buttons = Array.from(document.querySelectorAll('button, div, span'));
+                                        for (const btn of buttons) {
+                                            const text = btn.innerText?.toLowerCase() || btn.textContent?.toLowerCase() || '';
+                                            if (text.includes('изменить')) {
+                                                btn.click();
+                                                return 'Clicked Изменить by text';
+                                            }
+                                        }
+                                        return 'No change button found';
+                                    });
+                                    console.log(`[TempMail] ${clicked}`);
+                                } catch (e) {}
+                                
+                                break; // Break inner loop and try again
+                            }
+                        }
+                    }
+                }
+                
+                // Wait a bit before next check
+                await new Promise(r => setTimeout(r, 2000));
+            } catch (e) {
+                console.log(`[TempMail] Attempt ${i + 1} failed: ${e.message}`);
+                await new Promise(r => setTimeout(r, 2000));
+            }
+        }
+        
+        throw new Error('Could not get Gmail address from 22.do after multiple attempts');
+    }
+
+    async waitForEmail(subjectKeyword = 'Puter', timeoutMs = 120000) {
+        console.log(`[TempMail] Waiting for email with keyword "${subjectKeyword}"...`);
+        const startTime = Date.now();
+        
+        while (Date.now() - startTime < timeoutMs) {
+            try {
+                // Click refresh button using JavaScript - exact selector from 22.do
+                const clickedRefresh = await this.mailPage.evaluate(() => {
+                    // Try exact ID first
+                    const refreshBtn = document.querySelector('#refresh');
+                    if (refreshBtn) {
+                        refreshBtn.click();
+                        return 'Clicked #refresh button';
+                    }
+                    
+                    // Fallback: look for icon-refresh
+                    const iconRefresh = document.querySelector('.icon-refresh');
+                    if (iconRefresh) {
+                        iconRefresh.closest('button')?.click();
+                        return 'Clicked icon-refresh';
+                    }
+                    
+                    // Try by button text
+                    const buttons = Array.from(document.querySelectorAll('button'));
+                    for (const btn of buttons) {
+                        const text = (btn.innerText || '').toLowerCase();
+                        if (text.includes('обновить') || text.includes('refresh')) {
+                            btn.click();
+                            return 'Clicked by text: ' + text.substring(0, 20);
+                        }
+                    }
+                    
+                    return 'No refresh button found';
+                });
+                
+                console.log(`[TempMail] ${clickedRefresh}`);
+                await new Promise(r => setTimeout(r, 3000));
+                
+                // 22.do specific selectors for email rows - try table first
+                const emailSelectors = [
+                    'table tbody tr',
+                    '.inbox-table tbody tr', 
+                    'tr[data-email]',
+                    '[class*="email-list"] > *',
+                    '.mail-item',
+                    '.message-row'
+                ];
+                
+                let emailRows = [];
+                let usedSelector = '';
+                for (const selector of emailSelectors) {
+                    emailRows = await this.mailPage.$$(selector);
+                    if (emailRows.length > 0) {
+                        console.log(`[TempMail] Found ${emailRows.length} email rows with "${selector}"`);
+                        usedSelector = selector;
+                        break;
+                    }
+                }
+                
+                // Also check if any row contains "confirmation code" or "Puter"
+                let foundEmail = false;
+                for (let i = 0; i < emailRows.length; i++) {
+                    const row = emailRows[i];
+                    const rowText = await this.mailPage.evaluate(el => el.textContent, row);
+                    console.log(`[TempMail] Row ${i}: ${rowText?.substring(0, 100)}`);
+                    
+                    // Check if this is the email we want
+                    if (rowText && (
+                        rowText.toLowerCase().includes(subjectKeyword.toLowerCase()) ||
+                        rowText.toLowerCase().includes('confirmation code') ||
+                        rowText.toLowerCase().includes('код') ||
+                        rowText.includes('Puter')
+                    )) {
+                        console.log(`[TempMail] Found target email at row ${i}`);
+                        
+                        // Try to extract code directly from row text first (for preview)
+                        const codeMatch = rowText.match(/(\d{3})[-\s]?(\d{3})/);
+                        if (codeMatch) {
+                            const code = codeMatch[0].replace(/\D/g, '');
+                            console.log(`[TempMail] Got code from row preview: ${code}`);
+                            return code;
+                        }
+                        
+                        // Click to open email
+                        await row.click();
+                        console.log(`[TempMail] Clicked row ${i} to open email`);
+                        await new Promise(r => setTimeout(r, 3000));
+                        
+                        // Get verification code from opened email
+                        const code = await this.extractVerificationCode();
+                        if (code) {
+                            console.log(`[TempMail] Got verification code: ${code}`);
+                            return code;
+                        }
+                        foundEmail = true;
+                    }
+                }
+                
+                // If no specific email found but rows exist, try clicking first one
+                if (!foundEmail && emailRows.length > 0) {
+                    console.log(`[TempMail] No target email found, checking all ${emailRows.length} rows...`);
+                    
+                    for (const row of emailRows) {
+                        const rowText = await this.mailPage.evaluate(el => el.textContent, row);
+                        // Look for any 6-digit code pattern
+                        const codeMatch = rowText.match(/(\d{3})[-\s]?(\d{3})/) || rowText.match(/\d{6}/);
+                        if (codeMatch) {
+                            const code = codeMatch[0].replace(/\D/g, '');
+                            if (code.length === 6) {
+                                console.log(`[TempMail] Found code in row: ${code}`);
+                                return code;
+                            }
+                        }
+                    }
+                }
+            } catch (e) {
+                console.log(`[TempMail] Check error: ${e.message}`);
+            }
+            
+            await new Promise(r => setTimeout(r, 5000));
+        }
+        
+        throw new Error('Timeout waiting for email');
+    }
+
+    async extractVerificationCode() {
+        try {
+            const pageText = await this.mailPage.evaluate(() => document.body.innerText);
+            console.log(`[TempMail] Page text sample: ${pageText?.substring(0, 200)}`);
+            
+            // Look for 6-digit codes (possibly with hyphens like 317-813)
+            // Pattern: 3 digits, optional hyphen/dash/space, 3 digits
+            const codePatterns = [
+                /\b(\d{3})[-\s]?(\d{3})\b/,  // 317-813 or 317 813 or 317813
+                /\b\d{6}\b/,                  // 6 digits in a row
+                /confirmation code[:\s]*(\d[-\s]?\d[-\s]?\d[-\s]?\d[-\s]?\d[-\s]?\d)/i,
+                /code[:\s]*(\d{3})[-\s]?(\d{3})/i
+            ];
+            
+            for (const pattern of codePatterns) {
+                const match = pageText.match(pattern);
+                if (match) {
+                    // Extract just the digits, remove any hyphens or spaces
+                    let code = match[0].replace(/\D/g, '');
+                    if (code.length === 6) {
+                        console.log(`[TempMail] Found verification code: ${code}`);
+                        return code;
+                    }
+                }
+            }
+            
+            // Look for codes in specific elements
+            const codeSelectors = [
+                '[class*="code"]',
+                '[class*="verification"]',
+                'code',
+                'strong',
+                'h1',
+                'h2',
+                'td'  // Table cells often contain codes
+            ];
+            
+            for (const selector of codeSelectors) {
+                const elements = await this.mailPage.$$(selector);
+                for (const el of elements) {
+                    const text = await this.mailPage.evaluate(e => e.textContent, el);
+                    // Look for 6-digit pattern with optional separator
+                    const match = text?.match(/\b(\d{3})[-\s]?(\d{3})\b/) || text?.match(/\b\d{6}\b/);
+                    if (match) {
+                        const code = match[0].replace(/\D/g, '');
+                        if (code.length === 6) {
+                            console.log(`[TempMail] Found code in element: ${code}`);
+                            return code;
+                        }
+                    }
+                }
+            }
+        } catch (e) {
+            console.log(`[TempMail] Code extraction error: ${e.message}`);
+        }
+        return null;
+    }
+
+    async close() {
+        if (this.mailPage) {
+            await this.mailPage.close().catch(() => {});
+        }
+    }
+}
+
+// =====================
 // Browser Session Class
 // =====================
 
@@ -249,12 +553,11 @@ class BrowserSession {
                     '--mute-audio',
                     '--no-first-run',
                     '--incognito',  // INCOGNITO MODE
-                    '--disable-blink-features=AutomationControlled',
-                    '--window-position=-10000,-10000'
+                    '--disable-blink-features=AutomationControlled'
                 ];
 
                 const response = await connect({
-                    headless: 'auto',
+                    headless: false,
                     turnstile: true,
                     customConfig: { 
                         chromePath: executablePath,
@@ -342,29 +645,20 @@ class BrowserSession {
     }
 
     async waitForLogin() {
-        console.log(`[Session #${this.id}] Waiting for Login...`);
+        console.log(`[Session #${this.id}] Waiting for Login/Registration...`);
         let loggedIn = false;
+        let registrationAttempted = false;
 
-        for (let i = 0; i < 45; i++) { // 90 seconds max
+        for (let i = 0; i < 60; i++) { // 120 seconds max
             await new Promise(r => setTimeout(r, 2000));
 
-            // Auto-click "Get Started"
-            try {
-                await this.page.evaluate(() => {
-                    const buttons = Array.from(document.querySelectorAll('button, a'));
-                    const startBtn = buttons.find(b => b.innerText.match(/Get Started|Start|Guest|Try/i));
-                    if (startBtn) startBtn.click();
-                });
-            } catch (e) { }
-
+            // Check current status first
             await this.injectHelpers();
-
-            // Check Status
             const state = await this.getPageStatus();
             
             // Debug logging
-            if (i % 5 === 0) { // Log every 10 seconds
-                console.log(`[Session #${this.id}] Check ${i}: API=${state.api}, Token=${state.token ? 'YES (' + (typeof state.token) + ')' : 'NO'}`);
+            if (i % 5 === 0) {
+                console.log(`[Session #${this.id}] Check ${i}: API=${state.api}, Token=${state.token ? 'YES' : 'NO'}`);
             }
             
             if (state.api && state.token) {
@@ -380,8 +674,74 @@ class BrowserSession {
                     chatStore.saveToken(tokenStr);
                     loggedIn = true;
                     break;
-                } else {
-                    console.log(`[Session #${this.id}] ⚠️ Invalid token format:`, tokenStr);
+                }
+            }
+
+            // Auto-click "Get Started" or "Continue as Guest" if available
+            try {
+                const clicked = await this.page.evaluate(() => {
+                    const buttons = Array.from(document.querySelectorAll('button, a'));
+                    const startBtn = buttons.find(b => {
+                        const text = b.innerText?.toLowerCase() || '';
+                        return text.match(/get started|start|guest|try|continue/i);
+                    });
+                    if (startBtn) {
+                        startBtn.click();
+                        return true;
+                    }
+                    return false;
+                });
+                if (clicked) {
+                    console.log(`[Session #${this.id}] Clicked start/guest button`);
+                    await new Promise(r => setTimeout(r, 3000));
+                }
+            } catch (e) { }
+
+            // Check if registration form is present and we haven't tried yet
+            if (!registrationAttempted) {
+                try {
+                    // Take screenshot to debug
+                    if (i % 3 === 0) {
+                        try {
+                            await this.page.screenshot({ path: `debug_${this.id}_${i}.png` }).catch(() => {});
+                        } catch (e) {}
+                    }
+                    
+                    const pageInfo = await this.page.evaluate(() => {
+                        const inputs = Array.from(document.querySelectorAll('input'));
+                        const buttons = Array.from(document.querySelectorAll('button'));
+                        
+                        return {
+                            url: window.location.href,
+                            title: document.title,
+                            inputCount: inputs.length,
+                            buttonCount: buttons.length,
+                            inputTypes: inputs.map(i => ({ type: i.type, name: i.name, placeholder: i.placeholder?.substring(0, 20) })),
+                            buttonTexts: buttons.map(b => b.innerText?.substring(0, 30)),
+                            hasCreateFreeAccountBtn: buttons.some(b => b.innerText?.toLowerCase().includes('create free account')),
+                            hasPasswordInput: inputs.some(i => i.type === 'password'),
+                            hasEmailInput: inputs.some(i => i.type === 'email')
+                        };
+                    });
+                    
+                    // Log every 3 checks to see what's on the page
+                    if (i % 3 === 0) {
+                        console.log(`[Session #${this.id}] Page info:`, JSON.stringify(pageInfo, null, 2));
+                    }
+                    
+                    const needsSignup = pageInfo.hasCreateFreeAccountBtn || 
+                                       (pageInfo.hasPasswordInput && pageInfo.hasEmailInput) ||
+                                       pageInfo.buttonTexts.some(t => t?.toLowerCase().includes('create'));
+                    
+                    if (needsSignup) {
+                        console.log(`[Session #${this.id}] REGISTRATION FORM DETECTED! Starting auto-registration...`);
+                        console.log(`[Session #${this.id}] Page details:`, pageInfo);
+                        await this.performRegistration();
+                        registrationAttempted = true;
+                        await new Promise(r => setTimeout(r, 5000));
+                    }
+                } catch (e) {
+                    console.log(`[Session #${this.id}] Registration check error: ${e.message}`);
                 }
             }
         }
@@ -394,6 +754,269 @@ class BrowserSession {
         } else {
             console.log(`[Session #${this.id}] Login Timeout.`);
             throw new Error('Login Timeout');
+        }
+    }
+
+    async performRegistration() {
+        const tempMail = new TempMailHelper(this.browser);
+        
+        try {
+            // Get temp email
+            let email = await tempMail.init();
+            console.log(`[Session #${this.id}] Raw email from tempmail: ${email}`);
+            // Clean email - extract just the email address
+            if (email && typeof email === 'string') {
+                // Find pattern: something@something.something (up to 4 chars after dot)
+                const emailMatch = email.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,6}/);
+                if (emailMatch) {
+                    email = emailMatch[0];
+                    console.log(`[Session #${this.id}] Cleaned email: ${email}`);
+                } else {
+                    console.log(`[Session #${this.id}] Could not clean email, using as-is`);
+                }
+            }
+            console.log(`[Session #${this.id}] Final email to use: ${email}`);
+            
+            // Generate random username
+            const randomUsername = 'user_' + Math.random().toString(36).substring(2, 10);
+            const password = 'login12As_';
+            
+            console.log(`[Session #${this.id}] Registering with username: ${randomUsername}`);
+            
+            // Fill registration form
+            await this.fillRegistrationForm(randomUsername, email, password);
+            
+            // Wait for page to stabilize after form submission (may navigate)
+            await new Promise(r => setTimeout(r, 5000));
+            
+            // Check if we're on verification code page
+            const isVerificationPage = await this.page.evaluate(() => {
+                const text = document.body.innerText?.toLowerCase() || '';
+                return text.includes('confirm your email') || 
+                       text.includes('verification code') ||
+                       text.includes('6-digit') ||
+                       text.includes('confirmation code');
+            });
+            
+            if (isVerificationPage) {
+                console.log(`[Session #${this.id}] 📧 On verification page, waiting for email...`);
+                
+                // Wait for verification email
+                const code = await tempMail.waitForEmail('Puter', 120000);
+                
+                if (code) {
+                    console.log(`[Session #${this.id}] Entering verification code: ${code}`);
+                    await this.enterVerificationCode(code);
+                    
+                    // Wait after entering code
+                    await new Promise(r => setTimeout(r, 5000));
+                } else {
+                    console.log(`[Session #${this.id}] No verification code found`);
+                }
+            } else {
+                // Check if there's an error message
+                const hasError = await this.page.evaluate(() => {
+                    const pageText = document.body.innerText?.toLowerCase() || '';
+                    return pageText.includes('does not seem to be valid') || 
+                           pageText.includes('email is invalid') ||
+                           pageText.includes('invalid email');
+                });
+                
+                if (hasError) {
+                    console.log(`[Session #${this.id}] ❌ Email rejected by Puter, need to get new Gmail...`);
+                    // Handle error case...
+                    await tempMail.close();
+                    // ... rest of error handling
+                } else {
+                    // Wait for verification email anyway
+                    console.log(`[Session #${this.id}] Waiting for verification email...`);
+                    const code = await tempMail.waitForEmail('Puter', 120000);
+                    
+                    if (code) {
+                        console.log(`[Session #${this.id}] Got code, entering: ${code}`);
+                        await this.enterVerificationCode(code);
+                    }
+                }
+            }
+            
+            await tempMail.close();
+            
+        } catch (e) {
+            console.error(`[Session #${this.id}] Registration error: ${e.message}`);
+        }
+    }
+
+    async fillRegistrationForm(username, email, password) {
+        try {
+            console.log(`[Session #${this.id}] Filling registration form...`);
+            console.log(`[Session #${this.id}] Email to fill: ${email}`);
+            await new Promise(r => setTimeout(r, 2000));
+            
+            // Use JavaScript to fill inputs directly - more reliable than typing
+            const fillResult = await this.page.evaluate((u, e, p) => {
+                let result = { username: false, email: false, password: false, confirmPassword: false };
+                
+                // Find all inputs
+                const inputs = document.querySelectorAll('input');
+                
+                inputs.forEach(input => {
+                    const type = input.type?.toLowerCase() || '';
+                    const name = input.name?.toLowerCase() || '';
+                    const placeholder = input.placeholder?.toLowerCase() || '';
+                    
+                    // Fill username (first text input without special attributes)
+                    if (!result.username && type === 'text' && !name.includes('search') && !placeholder.includes('search')) {
+                        input.value = u;
+                        input.dispatchEvent(new Event('input', { bubbles: true }));
+                        input.dispatchEvent(new Event('change', { bubbles: true }));
+                        result.username = true;
+                    }
+                    // Fill email
+                    else if (!result.email && type === 'email') {
+                        input.value = e;
+                        input.dispatchEvent(new Event('input', { bubbles: true }));
+                        input.dispatchEvent(new Event('change', { bubbles: true }));
+                        result.email = true;
+                    }
+                    // Fill password (first password field)
+                    else if (!result.password && type === 'password' && !name.includes('confirm')) {
+                        input.value = p;
+                        input.dispatchEvent(new Event('input', { bubbles: true }));
+                        input.dispatchEvent(new Event('change', { bubbles: true }));
+                        result.password = true;
+                    }
+                    // Fill confirm password (second password field or confirm-password)
+                    else if (!result.confirmPassword && type === 'password' && (name.includes('confirm') || result.password)) {
+                        input.value = p;
+                        input.dispatchEvent(new Event('input', { bubbles: true }));
+                        input.dispatchEvent(new Event('change', { bubbles: true }));
+                        result.confirmPassword = true;
+                    }
+                });
+                
+                return result;
+            }, username, email, password);
+            
+            console.log(`[Session #${this.id}] Filled via JS:`, fillResult);
+            await new Promise(r => setTimeout(r, 1000));
+            
+            // Click "Create Free Account" button
+            const clicked = await this.page.evaluate(() => {
+                const buttons = Array.from(document.querySelectorAll('button'));
+                for (const btn of buttons) {
+                    const text = btn.innerText?.toLowerCase() || '';
+                    if (text.includes('create free account') || text.includes('sign up') || text.includes('register')) {
+                        btn.click();
+                        return `Clicked: ${btn.innerText}`;
+                    }
+                }
+                return null;
+            });
+            
+            if (clicked) {
+                console.log(`[Session #${this.id}] ${clicked}`);
+            }
+            
+        } catch (e) {
+            console.error(`[Session #${this.id}] Form fill error: ${e.message}`);
+        }
+    }
+
+    async enterVerificationCode(code) {
+        try {
+            console.log(`[Session #${this.id}] Entering verification code: ${code}`);
+            await new Promise(r => setTimeout(r, 2000));
+            
+            // Clean code - remove any non-digit characters
+            const cleanCode = code.replace(/\D/g, '');
+            const digits = cleanCode.split('');
+            
+            console.log(`[Session #${this.id}] Clean code digits: ${digits.join(', ')}`);
+            
+            // Method 1: Try to fill 6 separate input fields
+            const filled = await this.page.evaluate((codeDigits) => {
+                // Find all text inputs that look like digit inputs
+                const allInputs = Array.from(document.querySelectorAll('input'));
+                
+                // Filter for digit inputs (type=text, maxlength=1 or pattern=[0-9])
+                const digitInputs = allInputs.filter(inp => {
+                    const isText = inp.type === 'text' || inp.type === 'number' || inp.type === 'tel';
+                    const isShort = inp.maxLength === 1 || inp.maxLength === 2;
+                    const isNumeric = inp.inputMode === 'numeric' || 
+                                     inp.pattern?.includes('[0-9]') ||
+                                     inp.getAttribute('autocomplete') === 'one-time-code';
+                    const hasSmallWidth = inp.offsetWidth > 0 && inp.offsetWidth < 60; // Small boxes
+                    
+                    return isText && (isShort || isNumeric || hasSmallWidth);
+                });
+                
+                console.log(`[CodeEntry] Found ${digitInputs.length} digit inputs`);
+                
+                if (digitInputs.length >= 6) {
+                    // Sort by position to fill left-to-right
+                    const sortedInputs = digitInputs.slice(0, 6).sort((a, b) => {
+                        const rectA = a.getBoundingClientRect();
+                        const rectB = b.getBoundingClientRect();
+                        return rectA.left - rectB.left || rectA.top - rectB.top;
+                    });
+                    
+                    sortedInputs.forEach((input, i) => {
+                        const digit = codeDigits[i];
+                        if (digit) {
+                            input.focus();
+                            input.value = digit;
+                            // Trigger all events
+                            input.dispatchEvent(new Event('focus', { bubbles: true }));
+                            input.dispatchEvent(new Event('input', { bubbles: true }));
+                            input.dispatchEvent(new KeyboardEvent('keydown', { key: digit, bubbles: true }));
+                            input.dispatchEvent(new KeyboardEvent('keyup', { key: digit, bubbles: true }));
+                            input.dispatchEvent(new Event('change', { bubbles: true }));
+                        }
+                    });
+                    return `Filled ${sortedInputs.length} digit fields`;
+                }
+                
+                // Method 2: Try single input field that accepts full code
+                for (const input of allInputs) {
+                    const placeholder = input.placeholder?.toLowerCase() || '';
+                    const name = input.name?.toLowerCase() || '';
+                    const id = input.id?.toLowerCase() || '';
+                    const aria = input.getAttribute('aria-label')?.toLowerCase() || '';
+                    
+                    if (placeholder.includes('code') || name.includes('code') || id.includes('code') || 
+                        aria.includes('code') || placeholder.includes('verification')) {
+                        input.focus();
+                        input.value = codeDigits.join('');
+                        input.dispatchEvent(new Event('input', { bubbles: true }));
+                        input.dispatchEvent(new Event('change', { bubbles: true }));
+                        return 'Single field filled';
+                    }
+                }
+                
+                return 'No fields found';
+            }, digits);
+            
+            console.log(`[Session #${this.id}] Code entry result: ${filled}`);
+            await new Promise(r => setTimeout(r, 1500));
+            
+            // Click verify/confirm button
+            const clicked = await this.page.evaluate(() => {
+                const buttons = Array.from(document.querySelectorAll('button'));
+                for (const btn of buttons) {
+                    const text = btn.innerText?.toLowerCase() || btn.textContent?.toLowerCase() || '';
+                    if (text.includes('confirm email') || text.includes('verify') || 
+                        text.includes('confirm') || text.includes('submit')) {
+                        btn.click();
+                        return `Clicked: ${btn.innerText || btn.textContent}`;
+                    }
+                }
+                return 'No button found';
+            });
+            
+            console.log(`[Session #${this.id}] Button click: ${clicked}`);
+            
+        } catch (e) {
+            console.error(`[Session #${this.id}] Code entry error: ${e.message}`);
         }
     }
 
@@ -929,9 +1552,70 @@ class SessionPool {
     constructor() {
         this.primary = null;
         this.sessionCounter = 0;
-        this.tokenCache = null; // Don't load from storage - always fresh
+        this.tokenCache = null;
         this.isInitializing = false;
         this.initPromise = null;
+        
+        // Request queue system for rotation
+        this.requestQueue = [];
+        this.isRotating = false;
+        this.rotationPromise = null;
+        this.autoRotationEnabled = true;
+        this.rotationInterval = null;
+        
+        // Start infinite rotation loop
+        this.startInfiniteRotation();
+    }
+    
+    startInfiniteRotation() {
+        console.log('[Pool] 🔄 Starting INFINITE account rotation loop...');
+        
+        // Initial session creation
+        this.init().then(() => {
+            console.log('[Pool] ✅ First session ready');
+            // Don't auto-rotate on token - only rotate when limit errors occur
+        }).catch(e => {
+            console.error('[Pool] ❌ Failed to start:', e);
+        });
+    }
+    
+    // Rotate only when called (on limit/quota errors)
+    async rotateOnLimitError() {
+        if (this.isRotating) {
+            console.log('[Pool] ⏳ Rotation already in progress, waiting...');
+            return this.rotationPromise;
+        }
+        
+        this.isRotating = true;
+        console.log('[Pool] 🔒 Limit/quota error - rotating to new account...');
+        
+        this.rotationPromise = (async () => {
+            try {
+                // Wait a bit for pending requests to complete
+                await new Promise(r => setTimeout(r, 3000));
+                
+                // Close old session
+                if (this.primary) {
+                    console.log('[Pool] 🔴 Closing old browser (limit reached)...');
+                    await this.primary.close().catch(() => {});
+                    this.primary = null;
+                }
+                
+                // Create new session with new account
+                console.log('[Pool] 🟢 Creating NEW browser with NEW account...');
+                this.primary = await this.createSession('primary');
+                
+                console.log('[Pool] ✅ Rotation complete! New account ready.');
+                
+            } catch (e) {
+                console.error('[Pool] ❌ Rotation failed:', e);
+            } finally {
+                this.isRotating = false;
+                this.rotationPromise = null;
+            }
+        })();
+        
+        return this.rotationPromise;
     }
 
     async init() {
@@ -1006,6 +1690,12 @@ class SessionPool {
     }
 
     async getSession() {
+        // If rotation is in progress, wait for it
+        if (this.isRotating && this.rotationPromise) {
+            console.log('[Pool] ⏳ Waiting for rotation to complete...');
+            await this.rotationPromise;
+        }
+        
         // If initializing, wait for it
         if (this.isInitializing) {
             await this.initPromise;
@@ -1117,9 +1807,9 @@ async function safeExecute(actionName, fn, retryCount = 0) {
             // Wait before retry (exponential backoff)
             await new Promise(r => setTimeout(r, (retryCount + 1) * 2000));
             
-            // Rotate session - this will open NEW incognito browser with NEW token
-            console.log(`[${actionName}] 🔄 Rotating to NEW browser...`);
-            await pool.forceRotate();
+            // Rotate session ONLY on limit/quota errors
+            console.log(`[${actionName}] 🔄 Rotating to NEW browser (limit reached)...`);
+            await pool.rotateOnLimitError();
             
             // Retry with new session
             return safeExecute(actionName, fn, retryCount + 1);
@@ -1396,7 +2086,7 @@ app.post('/api/chat', async (req, res) => {
                     if (isLimitError && retryCount < MAX_RETRIES) {
                         console.warn(`[Stream] 🔄 Retrying after limit error (attempt ${retryCount + 1}/${MAX_RETRIES})...`);
                         
-                        await pool.forceRotate();
+                        await pool.rotateOnLimitError();
                         await new Promise(r => setTimeout(r, (retryCount + 1) * 2000));
                         
                         return executeStream(retryCount + 1);
@@ -1687,7 +2377,7 @@ app.post('/api/session/recover', async (req, res) => {
             });
         }
 
-        // Force rotation with existing token
+        // Force rotation with existing token (recovery mode)
         await pool.forceRotate();
         
         res.json({
